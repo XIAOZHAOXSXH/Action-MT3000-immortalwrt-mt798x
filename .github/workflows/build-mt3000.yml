@@ -56,12 +56,15 @@ jobs:
     - name: Force Argon Theme as Default
       run: |
         cd openwrt
-        # 1. 修改默认主题设置
+        
+        # 1. 修改 Feeds 中的默认配置
         sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
         sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/modules/luci-base/root/etc/config/luci
 
-        # 2. 如果源码中有 default-settings 包，也尝试修改
-        find package/ -name "default-settings" | xargs -r sed -i 's/luci-theme-bootstrap/luci-theme-argon/g'
+        # 2. 修复报错的核心步骤：
+        # 使用 grep -rl 查找包含目标字符串的所有文件，只对文件进行 sed 替换
+        # 这样可以完美避开 "default-settings" 这种目录名
+        grep -rl "luci-theme-bootstrap" package/ | xargs -r sed -i 's/luci-theme-bootstrap/luci-theme-argon/g'
         
         # 3. 再次确认 .config 中 Argon 被选中
         echo "CONFIG_PACKAGE_luci-theme-argon=y" >> .config
