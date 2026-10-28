@@ -164,9 +164,12 @@ if [ "$need_third_party" = "true" ]; then
     #   - v2ray-geodata 钉的 2023-12-02 geosite 已被 v2fly 删除，下载 404
     # 清理列表取自 kenzok8/small 的 README，按 21.02 实际情况裁剪过。
     log "移除官方 feed 中冲突的包"
+    # lang/lyaml 也要移：官方那份用 luarocks 构建，依赖 luarocks/host，
+    # 21.02 上没有这个 host 包，装上也编不过。本仓库自带 package/lyaml，
+    # 改用 lyaml 自带的 luke 脚本构建，不依赖 luarocks。
     for p in net/alist net/adguardhome net/mosdns \
              net/xray-core net/v2ray-core net/v2ray-geodata \
-             net/smartdns utils/v2dat; do
+             net/smartdns utils/v2dat lang/lyaml; do
         if [ -d "feeds/packages/$p" ]; then
             rm -rf "feeds/packages/$p"
             echo "  移除 feeds/packages/$p"
@@ -209,11 +212,22 @@ if [ "$need_third_party" = "true" ]; then
     if [ "$WITH_PASSWALL" = "true" ]; then
         install_list="$install_list luci-app-passwall chinadns-ng dns2socks ipt2socks microsocks tcping sing-box xray-core geoview v2ray-geodata v2ray-geoip v2ray-geosite"
     fi
-    # OpenClash 用 ruby 处理配置，ruby / ruby-yaml 来自官方 packages feed，
-    # 必须在索引重建之后再 install，否则 feeds 找不到它们。
+    # OpenClash 的运行时依赖。feeds install 只装你点名的包，不会顺着
+    # depends 自动补齐，所以这里必须把 openclash 依赖的包全部列出，
+    # 漏一个就会在最后的 package/install 阶段报
+    #   cannot find dependency bash for luci-app-openclash
+    # 而那时已经编了几十分钟，代价很大。
     if [ "$WITH_OPENCLASH" = "true" ]; then
-        install_list="$install_list ruby ruby-yaml"
+        install_list="$install_list \
+            ruby ruby-yaml bash luci-compat \
+            ca-bundle curl unzip"
     fi
+
+    # 基础镜像自己就要用的包。这些包在 glmt3000.config 里是 =y，
+    # 但如果没有 feeds install 到 package/feeds 下，make defconfig 时
+    # 就会把它们当作「不存在」而丢掉，最终同样卡在 package/install。
+    install_list="$install_list \
+        lua-cjson wget-ssl luci-proto-ipv6 ipv6helper"
     # 注意不要用 2>/dev/null 吞掉错误：feeds install 失败时只在 stderr 说明原因，
     # 吞掉之后日志里只剩空行，完全看不出问题在哪。
     for p in $install_list; do
