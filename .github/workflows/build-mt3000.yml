@@ -110,21 +110,16 @@ jobs:
           echo "CCACHE_DIR=/workdir/.ccache" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
-      - name: 准备插件（按开关）
+      - name: 准备插件与 feeds（按开关）
         run: |
           chmod +x scripts/*.sh
+          # 脚本内部会：应用 feeds.conf → feeds update → 裁剪 small 源
+          # → 按白名单 install → 引入 OpenClash。
+          # 注意不要再在外面跑 feeds install -a，否则会把裁剪掉的包重新装回来，
+          # 符号表里又会出现 firewall4 依赖和 passwall2 的递归依赖，defconfig 段错误。
           ./scripts/prepare-packages.sh /workdir/openwrt \
             "${{ inputs.build_openclash || 'false' }}" \
             "${{ inputs.build_passwall || 'false' }}"
-
-      - name: 更新并安装 feeds
-        working-directory: /workdir/openwrt
-        run: |
-          if [ -f feeds.conf ]; then
-            echo "使用仓库自带 feeds.conf"
-          fi
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
 
       - name: 载入配置
         working-directory: /workdir/openwrt

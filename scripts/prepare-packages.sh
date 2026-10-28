@@ -4,14 +4,21 @@
 #
 # 用法:
 #   ./scripts/prepare-packages.sh <openwrt源码目录> <是否OpenClash> <是否PassWall>
-#   例如: ./scripts/prepare-packages.sh openwrt true false
 #
-# 设计要点：
-#   * 两个开关都为 false 时，完全不碰第三方源，产出的就是干净的官方固件。
-#   * 选中的包名与它们的依赖写进 .extra-deps，由 workflow 拼到 .config 后面，
-#     再统一 make defconfig，避免「先 defconfig 再 append 导致依赖被裁掉」的老问题。
-#   * OpenClash 不通过 feeds 引入：其仓库根目录含 img/ 等非包目录，
-#     scripts/feeds 会把它当成包去解析而报错。这里单独 clone，只链接单个目录。
+# ── 为什么不能 `feeds install -a` ────────────────────────────────────────
+# kenzok8/small 是一个「大杂烩」源，里面同时躺着适配 21.02 / 22.03 / 23.05 的包。
+# 全量 install 之后 `include/scan.mk` 会把 feeds/small 下每个 Makefile 都扫进
+# tmp/.config-package.in，其中：
+#   * clashoo / nikki / momo / luci-app-homeproxy 依赖 firewall4、kmod-nft-*，
+#     这些在 21.02（firewall3）里根本不存在；
+#   * luci-app-passwall2 的 Iptables_Transparent_Proxy 会 select PACKAGE_iptables。
+# 于是符号图里出现：
+#     PACKAGE_coreutils  <-selected-  PACKAGE_luci-app-passwall
+#     PACKAGE_luci-app-passwall       ->depends-> PACKAGE_iptables
+#     PACKAGE_iptables   <-selected-  PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy
+# 形成递归依赖环，Kconfig 解析时直接 Segmentation fault（make 报 Error 139）。
+#
+# 所以这里按白名单精确 install，让 feeds/small 里那些不相关的包不进入扫描。
 
 set -euo pipefail
 
@@ -26,29 +33,121 @@ cd "$OPENWRT_DIR"
 
 log() { echo -e "\n>>> $*"; }
 
-EXTRA_DEPS_FILE="$OPENWRT_DIR/.extra-deps"
-: > "$EXTRA_DEPS_FILE"
+# ---------------------------------------------------------------------------
+# 包清单
+# ---------------------------------------------------------------------------
+# PassWall 本体 + 它 LUCI_DEPENDS 里 21.02 feed 缺失、必须由 kenzok8/small 提供的部分。
+# 其余依赖（coreutils / curl / ip-full / dnsmasq-full / luci-compat …）官方 feed 里都有，
+# 由 make defconfig 自动补全，不需要列在这里。
+PASSWALL_PKGS=(
+    luci-app-passwall
+    lyaml
+    chinadns-ng
+    dns2socks
+    ipt2socks
+    microsocks
+    tcping
+    sing-box
+    xray-core
+    geoview
+    v2ray-geodata
+    v2ray-geoip
+    v2ray-geosite
+)
 
-# 写一个 PACKAGE 开关
-add_pkg() { echo "CONFIG_PACKAGE_$1=y" >> "$EXTRA_DEPS_FILE"; }
+# feeds 里实际存在的「源目录名」。
+# v2ray-geoip / v2ray-geosite 是 v2ray-geodata 这一个 Makefile 里 BuildPackage 出来的
+# 子包，目录名只有 v2ray-geodata，所以裁剪白名单要按目录名而不是包名来算。
+PASSWALL_FEED_DIRS=(
+    luci-app-passwall
+    chinadns-ng
+    dns2socks
+    ipt2socks
+    microsocks
+    tcping
+    sing-box
+    xray-core
+    geoview
+    v2ray-geodata
+)
 
-need_feeds_update=false
-[ "$WITH_OPENCLASH" = "true" ] && need_feeds_update=true
-[ "$WITH_PASSWALL" = "true" ]  && need_feeds_update=true
+need_third_party=false
+[ "$WITH_OPENCLASH" = "true" ] && need_third_party=true
+[ "$WITH_PASSWALL" = "true" ]  && need_third_party=true
 
 # ---------------------------------------------------------------------------
-# 0. 应用仓库自带的 feeds.conf（含 kenzok8/small）
+# 1. 预置要追加进 .config 的开关
 # ---------------------------------------------------------------------------
-if [ "$need_feeds_update" = "true" ]; then
-    log "应用自定义 feeds.conf"
-    cp -f "$GITHUB_WORKSPACE/feeds.conf" "$OPENWRT_DIR/feeds.conf"
+DOT_EXTRA="$OPENWRT_DIR/.extra-deps"
+: > "$DOT_EXTRA"
+
+if [ "$WITH_OPENCLASH" = "true" ]; then
+    for p in luci-app-openclash ruby ruby-yaml; do
+        echo "CONFIG_PACKAGE_$p=y" >> "$DOT_EXTRA"
+    done
+fi
+
+if [ "$WITH_PASSWALL" = "true" ]; then
+    for p in "${PASSWALL_PKGS[@]}"; do
+        echo "CONFIG_PACKAGE_$p=y" >> "$DOT_EXTRA"
+    done
+    # 透明代理分支不在这里写死：两个分支都是
+    # `default y if PACKAGE_firewall4` / `if ! PACKAGE_firewall4`，
+    # 21.02 没有 firewall4，会自动落到 iptables 分支。
+    # 手动指定反而容易与 passwall2 的同名符号打架。
 fi
 
 # ---------------------------------------------------------------------------
-# 1. OpenClash
+# 2. feeds
 # ---------------------------------------------------------------------------
+if [ "$need_third_party" = "true" ]; then
+    log "应用自定义 feeds.conf"
+    cp -f "$GITHUB_WORKSPACE/feeds.conf" "$OPENWRT_DIR/feeds.conf"
+
+    log "更新 feeds"
+    ./scripts/feeds update -a
+
+    # ---- 关键修复：把 small 源里不需要的包从扫描范围里摘掉 ----
+    #
+    # scan.mk 会遍历 feeds/small 下所有目录，所以仅靠「install 时只装几个」
+    # 是不够的 —— 那些 Makefile 依然在 feeds/small 里，依然会被扫进符号表。
+    # 这里在 update 之后、install 之前，把白名单之外的目录删掉。
+    log "裁剪 small 源，只保留本次需要的目录"
+    keep_dirs=""
+    [ "$WITH_PASSWALL" = "true" ]  && keep_dirs="$keep_dirs ${PASSWALL_FEED_DIRS[*]}"
+
+    if [ -d feeds/small ]; then
+        for d in feeds/small/*/; do
+            name=$(basename "$d")
+            case " $keep_dirs " in
+                *" $name "*) : ;;                      # 白名单，保留
+                *) rm -rf "$d" ;;                      # 其余全部移除
+            esac
+        done
+        echo "  剩余目录：$(ls feeds/small 2>/dev/null | tr '\n' ' ')"
+    fi
+
+    log "安装选中的包"
+    install_list=""
+    [ "$WITH_PASSWALL" = "true" ] && install_list="luci-app-passwall chinadns-ng dns2socks ipt2socks microsocks tcping sing-box xray-core geoview v2ray-geodata v2ray-geoip v2ray-geosite"
+    for p in $install_list; do
+        ./scripts/feeds install "$p" 2>/dev/null || echo "  跳过 $p（源里没有该包名）"
+    done
+else
+    log "未选择插件，使用官方 feeds"
+    ./scripts/feeds update -a
+    ./scripts/feeds install -a
+fi
+
+# ---------------------------------------------------------------------------
+# 3. OpenClash：直接拷进 package/，不走 feeds
+# ---------------------------------------------------------------------------
+# OpenClash 仓库根目录含 img/ 等非包目录，用 src-git 挂进 feeds 会解析失败；
+# 而 clone 出来的 .git 又会让 feeds 把整个 /tmp/openclash-src 登记成一个 git 源。
+# 所以 clone 后删 .git，再把 luci-app-openclash 一个目录拷到 package/ 下，
+# 它就会像本地包一样被 scan.mk 正常扫到。
 if [ "$WITH_OPENCLASH" = "true" ]; then
-    log "启用 OpenClash"
+    log "引入 OpenClash"
     rm -rf /tmp/openclash-src
     git clone --depth=1 -b "$OPENCLASH_BRANCH" "$OPENCLASH_REPO" /tmp/openclash-src
 
@@ -56,63 +155,22 @@ if [ "$WITH_OPENCLASH" = "true" ]; then
         echo "ERROR: OpenClash 仓库中没有 luci-app-openclash 目录" >&2
         exit 1
     }
-    ln -sfn /tmp/openclash-src/luci-app-openclash package/luci-app-openclash
-
-    # OpenClash 运行时要用 ruby 处理配置文件；两者都来自 official packages feed。
-    # dnsmasq-full / kmod-tun 在基础配置里已经是 y，这里不再重复声明。
-    add_pkg luci-app-openclash
-    add_pkg ruby
-    add_pkg ruby-yaml
+    rm -rf /tmp/openclash-src/.git
+    rm -rf package/luci-app-openclash
+    cp -r /tmp/openclash-src/luci-app-openclash package/luci-app-openclash
+    echo "  已放入 package/luci-app-openclash"
 fi
 
 # ---------------------------------------------------------------------------
-# 2. PassWall
+# 4. 汇报
 # ---------------------------------------------------------------------------
-if [ "$WITH_PASSWALL" = "true" ]; then
-    log "启用 PassWall"
-
-    add_pkg luci-app-passwall
-
-    # 逐一列出的原因：PassWall 的依赖分散在 official feed 与 kenzok8/small 两处，
-    # 显式写出来能让缺包在 defconfig 阶段立刻暴露，而不是编译到一半才失败。
-    for p in \
-        lyaml \
-        chinadns-ng \
-        dns2socks \
-        ipt2socks \
-        microsocks \
-        tcping \
-        sing-box \
-        xray-core \
-        geoview \
-        v2ray-geodata \
-        v2ray-geoip \
-        v2ray-geosite
-    do
-        add_pkg "$p"
-    done
-
-    # PassWall 的配置子项，默认值看架构，这里显式打开常用的几项
-    cat >> "$EXTRA_DEPS_FILE" <<'EOF'
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin=y
-EOF
-fi
-
-# ---------------------------------------------------------------------------
-# 3. 汇报
-# ---------------------------------------------------------------------------
-if [ -n "$(cat "$EXTRA_DEPS_FILE")" ]; then
-    log "本次会额外编入的包："
-    sed -E 's/^CONFIG_PACKAGE_//; s/=y$//' "$EXTRA_DEPS_FILE" | grep -E '^[a-z]' | sed 's/^/    /'
+if [ -s "$DOT_EXTRA" ]; then
+    log "追加到 .config 的包开关："
+    grep -E '^CONFIG_PACKAGE_' "$DOT_EXTRA" \
+        | sed -E 's/^CONFIG_PACKAGE_//; s/=y$//' \
+        | sed 's/^/    /'
 else
-    log "未选择插件，只编基础固件"
+    log "无额外包开关"
 fi
 
 if [ -n "${GITHUB_ENV:-}" ]; then
