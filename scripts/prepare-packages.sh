@@ -183,8 +183,26 @@ if [ "$need_third_party" = "true" ]; then
     # 不是实时扫目录。删了目录、裁剪了 small 源之后必须重建索引，
     # 否则 install 仍会按旧索引命中已删除的路径。
     log "重建 feeds 索引"
-    rm -f feeds/*.index feeds/*.targetindex
+    # 必须连 feeds/<name>.tmp 一起删。
+    #
+    # feeds/<name>.index 只是个软链，指向 feeds/<name>.tmp/.packageinfo。
+    # 只删软链、留 .tmp 的话，update -i 里的 scan.mk 会认为缓存仍是最新的
+    # （它按 .packageinfo-xxx 的依赖时间戳判断），直接跳过扫描，
+    # 结果生成一个几乎空的索引。表现就是后面 feeds install 时满屏
+    # "WARNING: has a dependency on 'xxx', which does not exist"，
+    # 连 bash、lua-cjson 这种基础包都装不上。
+    for d in feeds/*.index feeds/*.targetindex feeds/*.tmp; do
+        if [ -e "$d" ]; then
+            rm -rf "$d"
+        fi
+    done
     ./scripts/feeds update -i
+    # 建完检查一下各源索引的大小，索引异常为空时早发现
+    for idx in feeds/*.index; do
+        if [ -f "$idx" ]; then
+            echo "  $(basename "$idx"): $(wc -l < "$idx") 行"
+        fi
+    done
 
     log "安装选中的包"
     install_list=""
