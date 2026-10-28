@@ -88,6 +88,45 @@ OpenClash 仓库根目录除了 `luci-app-openclash`，还有 `img/` 这类纯�
 
 PassWall 那边用的 `kenzok8/small` 就没有这个问题，目录名和包名一一对应，可以直接进 `feeds.conf`。原版 `xiaorouji/openwrt-passwall` 仓库已经访问不了，kenzok8 是持续同步的镜像。
 
+## 硬件加速与无线的几个坑
+
+作者在 [项目说明](https://cmi.hanwckf.top/p/immortalwrt-mt798x/) 里列了几条注意事项，都是容易踩且现象很迷惑的。`glmt3000.config` 已经按这些设置好了，改配置时注意别破坏。
+
+**不要开 flow-offload**
+
+turbo-acc 的 flow-offload 和 MTK 的 HNAT 硬件加速会打架。`kmod-mediatek_hnat` 开着的时候再开主线的 flow-offload，加速会失效甚至出异常。配置里这两行是对的，别动：
+
+```
+CONFIG_PACKAGE_kmod-mediatek_hnat=y
+# CONFIG_PACKAGE_TURBOACC_INCLUDE_FLOW_OFFLOADING is not set
+```
+
+同理 `kmod-shortcut-fe` 也不要开，作者说未经充分测试。
+
+**无线配置工具二选一**
+
+`mtwifi-cfg` 和 `luci-app-mtk` 不能共存，必须选一个。前者是作者新写的，走 OpenWrt 原生 LuCI 和 netifd；后者源自 MTK SDK，界面简陋但能调的驱动参数更多。
+
+配置里用的是 `mtwifi-cfg`：
+
+```
+CONFIG_PACKAGE_luci-app-mtwifi-cfg=y
+# CONFIG_PACKAGE_luci-app-mtk is not set
+# CONFIG_PACKAGE_wifi-profile is not set
+```
+
+想换回 `luci-app-mtk`，得把三个开关一起翻过来，只改一个会编不过。
+
+**MT3000 的 LAN 是 2.5G 口**
+
+GL-MT3000 / MT2500 的 WAN/LAN 与参考设计的 GMAC 对应关系不一致，上游已按 MTK 公版方案修正过，现在 2.5G 口作 LAN、1G 口作 WAN。`02_network` 里是 `ucidef_set_interfaces_lan_wan "eth0" "eth1"`，不要自己改回来，改了 HNAT 加速会不正常。
+
+**无线相关的使用建议**
+
+- 认证方式建议 WPA2-PSK/WPA3-PSK，兼容性最好
+- 中继扫描时驱动要花较长时间扫频段，期间该频段的设备可能掉线。触发扫描请走有线，或用另一个频段连进来操作
+- 老旧 2.4G 智能家居设备连不上时，试：WPA/WPA2-PSK + AES、2.4G 设成 N 模式、频宽 20MHz 并关掉强制 40MHz
+- 驱动层的 IGMP Snooping 有问题，新版源码已在运行时默认关闭。如果刷的是较旧固件，手动在无线设置里关掉
 ## 刷机
 
 第一次从 GL.iNet 原厂固件切过来：
