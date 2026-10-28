@@ -112,10 +112,9 @@ jobs:
       - name: 准备插件与 feeds（按开关）
         run: |
           chmod +x scripts/*.sh
-          # 脚本内部会：应用 feeds.conf → feeds update → 裁剪 small 源
-          # → 按白名单 install → 引入 OpenClash。
-          # 注意不要再在外面跑 feeds install -a，否则会把裁剪掉的包重新装回来，
-          # 符号表里又会出现 firewall4 依赖和 passwall2 的递归依赖，defconfig 段错误。
+          # 脚本内部会：feeds update -a → feeds install -a（官方全量）
+          # → 写入 .extra-deps → 需要时引入 OpenClash。
+          # 全部使用官方 feeds，不引入第三方源。
           ./scripts/prepare-packages.sh /workdir/openwrt \
             "${{ inputs.build_openclash || 'false' }}" \
             "${{ inputs.build_passwall || 'false' }}"
@@ -140,26 +139,73 @@ jobs:
           echo "CONFIG_CCACHE=y" >> .config
           echo "CONFIG_CCACHE_DIR=\"/workdir/.ccache\"" >> .config
 
-          make defconfig
+          # 落一份 defconfig 日志，下一步核对失败时用它定位原因
+          make defconfig 2>&1 | tee /tmp/defconfig.log
 
       - name: 把出厂 LAN 地址改为 192.168.8.1
         run: |
           ./scripts/set-default-lan.sh /workdir/openwrt
 
+      # 这一步是硬断言：.extra-deps 里要求的包，defconfig 之后必须仍然是 =y。
+      #
+      # 之前几轮的白跑都是同一个模式：某个包装不上，defconfig 静默把它丢掉，
+      # 然后继续编 40 分钟，最后在 package/install 阶段才报
+      # "cannot find dependency xxx"。这里把它提前到十几分钟内暴露，
+      # 并且把排查所需的信息一次打全（符号表定义、是否被 feeds 展开、defconfig 告警）。
       - name: 核对最终配置
         working-directory: /workdir/openwrt
         run: |
           echo "===== 目标设备 ====="
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=' .config || true
           echo
-          echo "===== 插件状态 ====="
-          for p in luci-app-openclash luci-app-passwall lyaml libyaml sing-box xray-core; do
-            if grep -qE "^CONFIG_PACKAGE_${p}=y" .config; then
-              echo "  [已启用] $p"
+
+          if [ ! -s .extra-deps ]; then
+            echo "本次没有勾选插件，跳过包断言"
+            exit 0
+          fi
+
+          echo "===== 请求的包是否真的进了固件 ====="
+          missing=""
+          for p in $(sed -nE 's/^CONFIG_PACKAGE_([A-Za-z0-9_.+-]+)=y$/\1/p' .extra-deps); do
+            if grep -qE "^CONFIG_PACKAGE_${p}=y$" .config; then
+              echo "  [OK]   $p"
             else
-              echo "  [未启用] $p"
+              echo "  [MISS] $p"
+              missing="$missing $p"
             fi
           done
+
+          if [ -n "$missing" ]; then
+            echo
+            echo "########## 有包被 defconfig 丢弃，提前失败，不浪费 40 分钟编译 ##########"
+            for p in $missing; do
+              echo
+              echo "----- ${p}：是否被 feeds install 展开到 package/feeds -----"
+              # 注意这里的 || true：包没展开时 ls 会失败，而 run 是 bash -e，
+              # 不加兜底会直接中断脚本，恰好把最需要的诊断信息吞掉。
+              found=$(ls -d package/feeds/*/"${p}" 2>/dev/null | head -1 || true)
+              if [ -n "$found" ]; then
+                echo "  已展开: $found"
+              else
+                echo "  没有展开！说明 feeds install 没成功，该包根本不在构建树里"
+              fi
+              echo "----- ${p}：Kconfig 符号定义 -----"
+              if grep -qE "^config PACKAGE_${p}\$" tmp/.config-package.in; then
+                grep -A8 -E "^config PACKAGE_${p}\$" tmp/.config-package.in | head -12 || true
+              else
+                echo "  符号 PACKAGE_${p} 不存在于符号表"
+              fi
+              echo "----- ${p}：defconfig 阶段的告警 -----"
+              grep -iE "(^|[^a-z])${p}([^a-z]|$)" /tmp/defconfig.log | head -8 || true
+            done
+            echo
+            echo "----- 无类型符号告警（常见于包定义残缺）-----"
+            grep -n "defined without type" /tmp/defconfig.log | head -5 || true
+            exit 1
+          fi
+
+          echo
+          echo "全部请求的包均已启用。"
 
       - name: 下载源码包
         working-directory: /workdir/openwrt

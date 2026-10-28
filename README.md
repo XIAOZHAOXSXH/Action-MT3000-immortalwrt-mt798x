@@ -24,24 +24,13 @@
 
 两个插件开关都不勾时，产出的就是干净的官方包集合，体积最小。可以两个都勾，但注意两个都是透明代理类工具，同时开容易抢 dnsmasq 和流量转发规则，实际用只留一个。
 
-除手动触发外，改动这几个路径也会自动触发编译：
-
-```
-glmt3000.config
-feeds.conf
-scripts/**
-.github/workflows/build-mt3000.yml
-```
+编译**只支持手动触发**，推代码不会自动开始。原因：手动触发时能勾插件，push 触发拿到的是默认参数（都不勾），两者并存的话每次改完推上去都会先跑一次无插件的、再手动跑一次带插件的，同一份源码白编两遍。
 
 ## 目录结构
 
 ```
 .
 ├── glmt3000.config                  # 编译配置（OpenWrt 的 .config）
-├── feeds.conf                       # 上游 feeds + kenzok8/small 插件源
-├── package/
-│   ├── libyaml/                     # 补包：21.02 没有 libyaml
-│   └── lyaml/                       # 补包：PassWall 依赖的 Lua YAML 绑定
 ├── scripts/
 │   ├── prepare-packages.sh          # 按开关准备插件
 │   └── set-default-lan.sh           # 改出厂 LAN 地址
@@ -69,24 +58,34 @@ netm=${netmask:-"255.255.255.0"}        →   保持不变
 LAN_IP=10.0.0.1 LAN_MASK=255.255.255.0 LAN_PREFIX=24 ./scripts/set-default-lan.sh openwrt
 ```
 
-## 关于两个补包
+## 为什么 PassWall 用官方 4.68 而不是最新的 26.x
 
-PassWall 26.x 的 `LUCI_DEPENDS` 里有 `+lyaml`，lyaml 又依赖 `libyaml`。但 `openwrt-21.02` 的 immortalwrt/packages 和 openwrt/packages 都没有 libyaml 这个包（只有不相干的 `libyaml-cpp`），上游的 lyaml 还依赖 `luarocks/host` 构建，在 21.02 的工具链下很容易挂。
+`immortalwrt/luci` 的 `openwrt-21.02` 分支自带 `applications/luci-app-passwall`，版本 4.68-1。这是该固件项目为 21.02 钦定的 PassWall 版本，依赖（`chinadns-ng`、`dns2tcp`、`ipt2socks`、`microsocks`、`tcping`、`ipset`、`iptables-mod-*`）全部来自官方 feed。
 
-所以这里自己补了两个包：
+早先试过引入 `kenzok8/small` 装 PassWall 26.10（最新版），结果是连续多轮编译失败，每个失败点都要单独打补丁：
 
-- `package/libyaml` —— libyaml 0.2.5 源码包，标准 autotools 构建
-- `package/lyaml` —— lyaml 6.2.7，绕开 luarocks，直接用上游自带的 `build-aux/luke` 配合 host lua 编译
+| 问题 | 后果 |
+| --- | --- |
+| small 源混有只适配 22.03/23.05 的包（`dae`、`nikki`、`momo`） | `make defconfig` 出现递归依赖，直接段错误 |
+| PassWall 26.x 依赖 `lyaml` → `libyaml` | 依赖链变长，`feeds install` 漏装就在最后阶段报 `cannot find dependency lyaml` |
+| `sing-box` / `xray-core` 26.x 要求 Go ≥1.27，21.02 只有 1.19 | 得整体替换 golang 包 |
+| 官方 `v2ray-geodata` 钉的 geosite 版本已被上游删除 | 下载 404，中断编译 |
 
-如果哪天上游 feed 补上了这两个包，删掉 `package/libyaml`、`package/lyaml` 即可，PassWall 会自动用 feed 里的版本。
+这些都能修，但每修一个都要跑一次 45 分钟到 1 小时的编译，而且修好一个又暴露下一个。所以按「最新版装不了就用本项目兼容到的最新版本」的原则，直接用官方 4.68。
+
+如果确实需要 26.x，`glmt3000.config` 里没有启用任何 Go 代理内核（`xray-core`、`sing-box`、`geoview` 都未开启），意味着还要连带把内核一起配上，改动面比现在大得多。
+
+**OpenClash 仍然是上游 master 的最新版**，它只需要 `ruby`、`ruby-yaml`、`bash` 这些官方包，没有版本冲突。
+
+顺带记一下踩过的坑：`libyaml` 在 feed 里的**源包名是 `yaml`**（`feeds/packages/libs/yaml`），二进制包才叫 `libyaml`。按目录名搜 `libyaml` 只会看到不相干的 `libyaml-cpp`，很容易误判成「21.02 没有 libyaml」。
 
 ## OpenClash 为什么没进 feeds.conf
 
 OpenClash 仓库根目录除了 `luci-app-openclash`，还有 `img/` 这类纯图片目录。用 `src-git` 挂进 feeds 的话，`scripts/feeds` 会把每个一级目录都当包去解析，碰上没有 Makefile 的目录直接报错退出。
 
-`scripts/prepare-packages.sh` 改成单独 clone，然后只把 `luci-app-openclash` 一个目录软链到 `package/` 下。
+`scripts/prepare-packages.sh` 改成单独 clone，然后只把 `luci-app-openclash` 一个目录拷到 `package/` 下。顺便删掉 clone 出来的 `.git`，否则 `scripts/feeds` 会把它当成一个 git 源重复登记。
 
-PassWall 那边用的 `kenzok8/small` 就没有这个问题，目录名和包名一一对应，可以直接进 `feeds.conf`。原版 `xiaorouji/openwrt-passwall` 仓库已经访问不了，kenzok8 是持续同步的镜像。
+现在整个仓库**不使用任何第三方 feed**，`feeds.conf` 都不需要了，直接用上游的 `feeds.conf.default`（packages / luci / routing / telephony）。
 
 ## 硬件加速与无线的几个坑
 
