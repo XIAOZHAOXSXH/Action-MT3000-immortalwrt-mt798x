@@ -138,10 +138,11 @@ if [ "$need_third_party" = "true" ]; then
     # Go 1.19 连 "go 1.25.0" 这种三段式版本号都不认，直接报
     #   invalid go version '1.25.0': must match format 1.23
     # 所以按 kenzok8/small README 的做法，换成 kenzok8/golang 打包的 Go。
-    # 这个仓库的分支号就是 Go 版本号，1.26 能覆盖上面所有需求。
-    log "替换 golang 为 kenzok8/golang 的 ${GOLANG_BRANCH:-1.26} 分支"
+    # 这个仓库的分支号就是 Go 版本号。xray-core 26.10 要求 go 1.27，
+    # 所以取 1.27 分支（Go 1.27.3），同时满足其余包的下限要求。
+    log "替换 golang 为 kenzok8/golang 的 ${GOLANG_BRANCH:-1.27} 分支"
     rm -rf feeds/packages/lang/golang
-    git clone --depth=1 -b "${GOLANG_BRANCH:-1.26}" "$GOLANG_REPO" feeds/packages/lang/golang
+    git clone --depth=1 -b "${GOLANG_BRANCH:-1.27}" "$GOLANG_REPO" feeds/packages/lang/golang
 
     # ---- 关键修复 2：移除官方 feed 中与 small 冲突或已失效的包 ----
     #
