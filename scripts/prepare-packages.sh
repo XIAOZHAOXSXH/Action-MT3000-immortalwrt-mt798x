@@ -27,6 +27,7 @@ WITH_OPENCLASH="${2:-false}"
 WITH_PASSWALL="${3:-false}"
 
 OPENCLASH_REPO="${OPENCLASH_REPO:-https://github.com/vernesong/OpenClash.git}"
+GOLANG_REPO="${GOLANG_REPO:-https://github.com/kenzok8/golang.git}"
 OPENCLASH_BRANCH="${OPENCLASH_BRANCH:-master}"
 
 cd "$OPENWRT_DIR"
@@ -127,25 +128,47 @@ if [ "$need_third_party" = "true" ]; then
         echo "  剩余目录：$(ls feeds/small 2>/dev/null | tr '\n' ' ')"
     fi
 
-    # ---- 关键修复 2：屏蔽官方 feed 里已失效的 v2ray-geodata ----
+    # ---- 关键修复 1：替换 golang ----
     #
-    # feeds/packages/net/v2ray-geodata 钉的是 2023-12-02 的 geosite 版本，
-    # 而 v2fly/domain-list-community 早已把那个 release 的 dlc.dat 删了，
-    # 编译时 download 阶段 404，直接中断整个 world 构建：
-    #   make[3]: *** [dlc.dat.20231202050515] Error 2
-    # kenzok8/small 里的同名包用的是较新的版本，两个包名相同，
-    # 必须把官方那个移走，否则 feeds install 会优先选中它。
-    if [ "$WITH_PASSWALL" = "true" ] && [ -d feeds/packages/net/v2ray-geodata ]; then
-        log "移除官方 feed 中失效的 v2ray-geodata（改用 small 源的版本）"
-        rm -rf feeds/packages/net/v2ray-geodata
+    # 21.02 自带的 golang 是 1.19.13，而现在的代理内核全都要求更高的 Go：
+    #   geoview 0.2.8        go 1.25.0
+    #   sing-box 1.15        go 1.25.5
+    #   xray-core 26.10      go 1.27
+    #   (官方 xray-core 1.8.3 也要 go 1.20)
+    # Go 1.19 连 "go 1.25.0" 这种三段式版本号都不认，直接报
+    #   invalid go version '1.25.0': must match format 1.23
+    # 所以按 kenzok8/small README 的做法，换成 kenzok8/golang 打包的 Go。
+    # 这个仓库的分支号就是 Go 版本号，1.26 能覆盖上面所有需求。
+    log "替换 golang 为 kenzok8/golang 的 ${GOLANG_BRANCH:-1.26} 分支"
+    rm -rf feeds/packages/lang/golang
+    git clone --depth=1 -b "${GOLANG_BRANCH:-1.26}" "$GOLANG_REPO" feeds/packages/lang/golang
+
+    # ---- 关键修复 2：移除官方 feed 中与 small 冲突或已失效的包 ----
+    #
+    # 与 small 重名的包必须删掉官方版本，否则 feeds install 会优先选中官方的。
+    # 官方这几个在 21.02 上都不可用：
+    #   - xray-core 1.8.3 太旧，xray 26.x 才是 small 里的版本
+    #   - v2ray-geodata 钉的 2023-12-02 geosite 已被 v2fly 删除，下载 404
+    # 清理列表取自 kenzok8/small 的 README，按 21.02 实际情况裁剪过。
+    log "移除官方 feed 中冲突的包"
+    for p in net/alist net/adguardhome net/mosdns \
+             net/xray-core net/v2ray-core net/v2ray-geodata \
+             net/smartdns utils/v2dat; do
+        if [ -d "feeds/packages/$p" ]; then
+            rm -rf "feeds/packages/$p"
+            echo "  移除 feeds/packages/$p"
+        fi
+    done
+    if [ -d feeds/luci/applications/luci-app-mosdns ]; then
+        rm -rf feeds/luci/applications/luci-app-mosdns
+        echo "  移除 feeds/luci/applications/luci-app-mosdns"
     fi
 
     # ---- 关键修复 3：重建 feeds 索引 ----
     #
-    # scripts/feeds 的 get_feed() 读的是 feeds/<name>.index 这个缓存文件，
-    # 不是实时扫目录。上面删了目录、裁剪了 small 源之后，如果不同步重建索引，
-    # install 仍然会按旧索引命中已被删掉的路径。
-    # 先删掉旧索引文件，确保重建时不会读到过期的目录清单。
+    # scripts/feeds 的 get_feed() 读的是 feeds/<name>.index 缓存文件，
+    # 不是实时扫目录。删了目录、裁剪了 small 源之后必须重建索引，
+    # 否则 install 仍会按旧索引命中已删除的路径。
     log "重建 feeds 索引"
     rm -f feeds/*.index feeds/*.targetindex
     ./scripts/feeds update -i
