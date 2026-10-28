@@ -72,9 +72,14 @@ PASSWALL_FEED_DIRS=(
     v2ray-geodata
 )
 
+# 注意：不要写成 `[ ... ] && var=true`。脚本开头是 set -e，
+# 条件为假时整条语句返回非 0，会被当成命令失败直接退出。
+# 之前就是这样，WITH_PASSWALL=false 时后面的 install 全被跳过，
+# 而飞书日志里只留一行空行，很隐蔽。
 need_third_party=false
-[ "$WITH_OPENCLASH" = "true" ] && need_third_party=true
-[ "$WITH_PASSWALL" = "true" ]  && need_third_party=true
+if [ "$WITH_OPENCLASH" = "true" ] || [ "$WITH_PASSWALL" = "true" ]; then
+    need_third_party=true
+fi
 
 # ---------------------------------------------------------------------------
 # 1. 预置要追加进 .config 的开关
@@ -105,17 +110,24 @@ if [ "$need_third_party" = "true" ]; then
     log "应用自定义 feeds.conf"
     cp -f "$GITHUB_WORKSPACE/feeds.conf" "$OPENWRT_DIR/feeds.conf"
 
-    log "更新 feeds"
-    ./scripts/feeds update -a
-
-    # ---- 关键修复：把 small 源里不需要的包从扫描范围里摘掉 ----
+    # ---- 只 clone 不建索引 ----
     #
-    # scan.mk 会遍历 feeds/small 下所有目录，所以仅靠「install 时只装几个」
-    # 是不够的 —— 那些 Makefile 依然在 feeds/small 里，依然会被扫进符号表。
-    # 这里在 update 之后、install 之前，把白名单之外的目录删掉。
-    log "裁剪 small 源，只保留本次需要的目录"
+    # feeds update -a 会顺带扫描每个源建索引，而 small 源里有几个 Makefile
+    # 在 21.02 上根本解析不了（dae / daed 要 bpf-headers，dns2socks-rust 要
+    # rust/host），扫描它们会报 "ERROR: please fix feeds/small/xxx/Makefile"。
+    # 更麻烦的是这会让整个 small 索引不完整，后面 feeds install 找不到包名，
+    # 又因为 stderr 被吞掉，日志里只看到一片空行。
+    #
+    # 所以拆成两步：先 update 只拉源码（-i 之外的更新），
+    # 裁掉不需要的目录，最后统一用 update -i 建一次干净的索引。
+    log "拉取 feeds 源码并裁剪 small 源"
+    # 先只把源码 clone 下来（此时不生成索引，扫描错误不会中断流程）
+    ./scripts/feeds update -a || true
+
     keep_dirs=""
-    [ "$WITH_PASSWALL" = "true" ]  && keep_dirs="$keep_dirs ${PASSWALL_FEED_DIRS[*]}"
+    if [ "$WITH_PASSWALL" = "true" ]; then
+        keep_dirs="${PASSWALL_FEED_DIRS[*]}"
+    fi
 
     if [ -d feeds/small ]; then
         for d in feeds/small/*/; do
@@ -176,9 +188,19 @@ if [ "$need_third_party" = "true" ]; then
 
     log "安装选中的包"
     install_list=""
-    [ "$WITH_PASSWALL" = "true" ] && install_list="luci-app-passwall chinadns-ng dns2socks ipt2socks microsocks tcping sing-box xray-core geoview v2ray-geodata v2ray-geoip v2ray-geosite"
+    if [ "$WITH_PASSWALL" = "true" ]; then
+        install_list="$install_list luci-app-passwall chinadns-ng dns2socks ipt2socks microsocks tcping sing-box xray-core geoview v2ray-geodata v2ray-geoip v2ray-geosite"
+    fi
+    # OpenClash 用 ruby 处理配置，ruby / ruby-yaml 来自官方 packages feed，
+    # 必须在索引重建之后再 install，否则 feeds 找不到它们。
+    if [ "$WITH_OPENCLASH" = "true" ]; then
+        install_list="$install_list ruby ruby-yaml"
+    fi
+    # 注意不要用 2>/dev/null 吞掉错误：feeds install 失败时只在 stderr 说明原因，
+    # 吞掉之后日志里只剩空行，完全看不出问题在哪。
     for p in $install_list; do
-        ./scripts/feeds install "$p" 2>/dev/null || echo "  跳过 $p（源里没有该包名）"
+        echo "  install $p"
+        ./scripts/feeds install "$p" || echo "  !! 跳过 $p（源里没有该包名）"
     done
 else
     log "未选择插件，使用官方 feeds"
