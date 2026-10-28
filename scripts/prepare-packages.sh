@@ -127,6 +127,29 @@ if [ "$need_third_party" = "true" ]; then
         echo "  剩余目录：$(ls feeds/small 2>/dev/null | tr '\n' ' ')"
     fi
 
+    # ---- 关键修复 2：屏蔽官方 feed 里已失效的 v2ray-geodata ----
+    #
+    # feeds/packages/net/v2ray-geodata 钉的是 2023-12-02 的 geosite 版本，
+    # 而 v2fly/domain-list-community 早已把那个 release 的 dlc.dat 删了，
+    # 编译时 download 阶段 404，直接中断整个 world 构建：
+    #   make[3]: *** [dlc.dat.20231202050515] Error 2
+    # kenzok8/small 里的同名包用的是较新的版本，两个包名相同，
+    # 必须把官方那个移走，否则 feeds install 会优先选中它。
+    if [ "$WITH_PASSWALL" = "true" ] && [ -d feeds/packages/net/v2ray-geodata ]; then
+        log "移除官方 feed 中失效的 v2ray-geodata（改用 small 源的版本）"
+        rm -rf feeds/packages/net/v2ray-geodata
+    fi
+
+    # ---- 关键修复 3：重建 feeds 索引 ----
+    #
+    # scripts/feeds 的 get_feed() 读的是 feeds/<name>.index 这个缓存文件，
+    # 不是实时扫目录。上面删了目录、裁剪了 small 源之后，如果不同步重建索引，
+    # install 仍然会按旧索引命中已被删掉的路径。
+    # 先删掉旧索引文件，确保重建时不会读到过期的目录清单。
+    log "重建 feeds 索引"
+    rm -f feeds/*.index feeds/*.targetindex
+    ./scripts/feeds update -i
+
     log "安装选中的包"
     install_list=""
     [ "$WITH_PASSWALL" = "true" ] && install_list="luci-app-passwall chinadns-ng dns2socks ipt2socks microsocks tcping sing-box xray-core geoview v2ray-geodata v2ray-geoip v2ray-geosite"
