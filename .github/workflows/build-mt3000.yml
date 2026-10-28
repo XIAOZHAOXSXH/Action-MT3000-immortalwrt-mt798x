@@ -1,6 +1,11 @@
 name: Build ImmortalWrt for GL-MT3000
 
 on:
+  # 只在 Actions 页面手动运行时编译。
+  #
+  # 这里刻意不挂 push 触发：手动触发时可以勾插件，push 触发拿到的是默认参数
+  # （都不勾），编出来的是基础固件。两者并存的话，每次改完脚本推上去会先自动
+  # 跑一次无插件的，再手动跑一次带插件的，同样的源码白编两遍，各 1.5～2 小时。
   workflow_dispatch:
     inputs:
       build_openclash:
@@ -15,12 +20,6 @@ on:
         description: '把固件上传到 Release'
         type: boolean
         default: true
-  push:
-    paths:
-      - 'glmt3000.config'
-      - 'feeds.conf'
-      - 'scripts/**'
-      - '.github/workflows/build-mt3000.yml'
 
 # Release 需要一个写权限的 token
 permissions:
